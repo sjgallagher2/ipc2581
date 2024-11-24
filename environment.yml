@@ -1,0 +1,10 @@
+name: ipc2581
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - spyder-kernels=2.4
+  - pythonocc-core=7.8.1
+  - matplotlib
+  - beautifulsoup4
