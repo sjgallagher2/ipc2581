@@ -467,7 +467,5 @@ if __name__ == '__main__':
     tree = ET.parse(fname)
     root = tree.getroot()
     print("Done")
-    # print(get_layer_list(root))
-    # print(get_layer_net_list(root,'TOP'))
     test_pcb = PCBAssembly(root)
 
