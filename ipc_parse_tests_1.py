@@ -14,6 +14,34 @@ def prefix(s: str, rpf: str = '{http://webstds.ipc.org/2581}'):
     return '/'.join(s_new)
 
 
+def read_int(d: dict, key: str):
+    if key not in d.keys():
+        return None
+    val = d[key]
+    if not val.isnumeric():
+        print(f"Warning: Could not convert value {val} to int. Returning None.")
+        return None
+    return int(val)
+
+
+def read_float(d: dict, key: str):
+    if key not in d.keys():
+        return None
+    val = d[key]
+    try:
+        return float(val)
+    except ValueError:
+        print("Warning: Could not convert value {val} to float. Returning None.")
+        return None
+
+
+def read_bool(d: dict, key: str):
+    if key not in d.keys():
+        return None
+    val = d[key]
+    return val.lower() == 'true'
+
+
 class IPC2581_Transform:
     def __init__(self, rotation: float = 0.0, mirror: bool = False, xOffset: float = 0.0, yOffset: float = 0.0):
         self.rotation = rotation  # angle in degrees
@@ -26,13 +54,13 @@ class IPC2581_Transform:
             raise ValueError(f'Expected tag Xform, instead got {xfrm_node.tag}')
 
         if 'rotation' in xfrm_node.attrib.keys():
-            self.rotation = float(xfrm_node.attrib['rotation'])
+            self.rotation = read_float(xfrm_node.attrib,'rotation')
         if 'mirror' in xfrm_node.attrib.keys():
-            self.mirror = xfrm_node.attrib['mirror']
+            self.mirror = read_bool(xfrm_node.attrib,'mirror')
         if 'xOffset' in xfrm_node.attrib.keys():
-            self.xOffset = xfrm_node.attrib['xOffset']
+            self.xOffset = read_float(xfrm_node.attrib,'xOffset')
         if 'yOffset' in xfrm_node.attrib.keys():
-            self.yOffset = xfrm_node.attrib['yOffset']
+            self.yOffset = read_float(xfrm_node.attrib,'yOffset')
 
 class IPC2581_Circle:
     def __init__(self, diameter: float = 0.0,fill_desc_ref: str = '',transform: IPC2581_Transform=None):
@@ -44,7 +72,7 @@ class IPC2581_Circle:
         if circle_node.tag != prefix('Circle'):
             raise ValueError(f"Expected tag to be Circle, instead got {circle_node.tag}")
 
-        self.diameter = circle_node.attrib['diameter']
+        self.diameter = read_float(circle_node.attrib,'diameter')
         fdr_node = circle_node.find(prefix('FillDescRef'))
         if fdr_node is not None:
             self.fill_desc_ref = fdr_node.attrib['id']
@@ -52,6 +80,30 @@ class IPC2581_Circle:
         if xfrm_node is not None:
             self.transform = IPC2581_Transform()
             self.transform.load(xfrm_node)
+
+
+class IPC2581_Line:
+    """
+    A Line has a start position, end position, and line description
+    """
+    def __init__(self, start_pos: tuple[float,float] = (0.0, 0.0),
+                 end_pos: tuple[float,float] = (0.0, 0.0),
+                 lineEnd: str = 'ROUND', lineWidth: float = 0.0):
+        self.start_pos = start_pos
+        self.end_pos = end_pos
+        self.lineEnd = lineEnd
+        self.lineWidth = lineWidth
+
+    def load(self, line_node):
+        if line_node.tag != prefix('Line'):
+            raise ValueError(f'Expected Line tag, instead got {line_node.tag}')
+        self.start_pos = (float(line_node.attrib['startX']), float(line_node.attrib['startY']))
+        self.end_pos = (float(line_node.attrib['endX']), float(line_node.attrib['endY']))
+
+        ld_node = line_node.find(prefix('LineDesc'))
+        if ld_node is not None:
+            self.lineEnd = ld_node.attrib['lineEnd']
+            self.lineWidth = float(ld_node.attrib['lineWidth'])
 
 
 class IPC2581_RectCenter:
@@ -64,8 +116,8 @@ class IPC2581_RectCenter:
     def load(self, rc_node: ET.Element):
         if rc_node.tag != prefix('RectCenter'):
             raise ValueError(f'Expected RectCenter tag, instead got {rc_node.tag}')
-        self.width = float(rc_node.attrib['width'])
-        self.height = float(rc_node.attrib['height'])
+        self.width = read_float(rc_node.attrib,'width')
+        self.height = read_float(rc_node.attrib,'height')
 
         fdr_node = rc_node.find(prefix('FillDescRef'))
         if fdr_node is not None:
@@ -86,8 +138,8 @@ class IPC2581_Oval:
     def load(self, oval_node: ET.Element):
         if oval_node.tag != prefix('Oval'):
             raise ValueError(f'Expected Oval tag, instead got {oval_node.tag}')
-        self.width = float(oval_node.attrib['width'])
-        self.height = float(oval_node.attrib['height'])
+        self.width = read_float(oval_node.attrib,'width')
+        self.height = read_float(oval_node.attrib,'height')
 
         fdr_node = oval_node.find(prefix('FillDescRef'))
         if fdr_node is not None:
@@ -195,7 +247,7 @@ class IPC2581_Polyline:
                 ))
             elif pnode.tag == prefix('LineDesc'):
                 self.lineEnd = pnode.attrib['lineEnd']
-                self.lineWidth = float(pnode.attrib['lineWidth'])
+                self.lineWidth = read_float(pnode.attrib,'lineWidth')
 
 class IPC2581_UserSpecial:
     """
@@ -213,6 +265,8 @@ class IPC2581_UserSpecial:
             shape_tag = shape_node.tag
             if shape_tag == prefix('Circle'):
                 shape = IPC2581_Circle()
+            elif shape_tag == prefix('Line'):
+                shape = IPC2581_Line()
             elif shape_tag == prefix('RectCenter'):
                 shape = IPC2581_RectCenter()
             elif shape_tag == prefix('Oval'):
@@ -230,22 +284,285 @@ class IPC2581_UserSpecial:
             self.shapes.append(shape)
 
 
+class IPC2581_BomItem:
+    def __init__(self):
+        self.quantity = 0
+        self.pin_count = 0
+        self.category = ''
+        self.OEM_design_number_ref = ''
+        self.characteristics = []
+        self.characteristics_categories = []
+        self.reference_designators = []
+
+    def load(self,bomitem_node: ET.Element):
+        if bomitem_node.tag != prefix('BomItem'):
+            raise ValueError(f"Unexpected tag {bomitem_node.tag}. Expected 'BomItem'.")
+        self.quantity = read_int(bomitem_node.attrib,'quantity')
+        self.pin_count = read_int(bomitem_node.attrib,'pinCount')
+        self.category = bomitem_node.attrib['category']
+        self.OEM_design_number_ref = bomitem_node.attrib['OEMDesignNumberRef']
+        refdes_nodes = bomitem_node.findall(prefix('RefDes'))
+        for rdn in refdes_nodes:
+            self.reference_designators.append(rdn.attrib)
+
+        characteristics_nodes = bomitem_node.findall(prefix('Characteristics'))
+        for cnode in characteristics_nodes:
+            if cnode is not None:
+                if 'category' in cnode.attrib.keys():
+                    self.characteristics_categories.append(cnode.attrib['category'])
+                else:
+                    self.characteristics_categories.append('')
+                # parse characteristics
+                textual_nodes = cnode.findall(prefix('Textual'))
+                chars = []
+                for tnode in textual_nodes:
+                    chars.append(tnode.attrib)
+                self.characteristics.append(chars)
+
+
+class IPC2581_Bom:
+    """
+    An IPC2581 Bom includes:
+     - A header with assembly name, rev, and geometry reference (step reference)
+     - A list of Bom items, each with a quantity, pin count, category, and OEM design number reference; as well as
+       characteristics, and finally a ref des object for each instantiation
+
+    The list of characteristics has a category (e.g. Electrical) and one or more characteristic objects
+     - Each characteristic object has a definition source, name, and value
+
+    Each reference designator object has a name, package reference (e.g. 402), a populate flag (True/False), and a layer
+    """
+    def __init__(self):
+        self.name = ''
+        self.assembly_name = ''  #
+        self.revision = ''       #
+        self.pcb_reference = ''  # StepRef
+        self.bom_items = []
+
+    def load(self,bomnode: ET.Element):
+        if bomnode.tag != prefix('Bom'):
+            raise ValueError(f"Unexpected tag {bomnode.tag}. Expected 'Bom'.")
+
+        self.name = bomnode.attrib['name']
+
+        bhdr_node = bomnode.find(prefix('BomHeader'))
+        if bhdr_node is not None:
+            self.assembly_name = bhdr_node.attrib['assembly']
+            self.revision = bhdr_node.attrib['revision']
+
+            stepref_node = bhdr_node.find(prefix('StepRef'))
+            if stepref_node is not None:
+                self.pcb_reference = stepref_node.attrib['name']
+
+        bomitem_nodes = bomnode.findall(prefix('BomItem'))
+        for binode in bomitem_nodes:
+            if binode is not None:
+                bomitem = IPC2581_BomItem()
+                bomitem.load(binode)
+                self.bom_items.append(bomitem)
+
+
+class IPC2581_Layer:
+    """
+    Represents a layer in a PCB, including specifications/properties, pads, physical net points, and traces/features
+
+    About components and pads:
+     - Top level <Component> tags store a layerRef and a packageRef
+     - The packageRef gives the name of a corresponding <Package> tag that has the geometry information in the <LandPattern>
+     - The LandPattern has multiple pads, each of which has a Location, and a StandardPrimitiveRef
+     - The <Pad>s also have padstackDefRef that references the PadStackDef name
+     - These PadStackDef tags have PadstackPadDef with a layerRef, padUse, Location (usually 0,0), and StandardPrimitiveRef
+     - The StandardPrimitiveRef also appears under the <Package> <Pin> tag(s)
+     - All StandardPrimitiveRef references should be the same, I assume...
+    Not sure why the <PadstackPadDef> have a layerRef
+
+    To make things more confusing, there are also <Set> tags with padstackRef
+
+    I'll need to work on this...
+
+    """
+    def __init__(self, root: ET.Element, name: str):
+        self.root = root
+        self.name = name
+
+        # from <Layer>
+        self.function = ''
+        self.side = ''
+        self.polarity = ''
+
+        # from <StackupLayer>
+        self.thickness = 0.0
+        self.tolPlus = 0.0
+        self.tolminus = 0.0
+        self.sequence = -1
+
+        # from <PhyNetPoint> tags
+        self.physical_net_points = []
+
+        # from <LayerFeature> tag
+        self.nets = {}  # netname : LayerNet
+
+
+        self.parse_Layer()
+        self.parse_StackupLayer()
+        self.parse_LayerFeature()
+
+    class PhysicalNetPoint:
+        def __init__(self):
+            self.position = (0.,0.)
+            self.layer = ''
+            self.net_node = ''
+            self.exposure = ''
+            self.via = False
+            self.primitive_ref = ''
+
+    class LayerNet:
+        def __init__(self,name):
+            self.name = name
+            self.feature_locations = []  # (x,y) coordinates
+            self.features = []  # IPC2581_xyz features
+
+        def load_feature(self, feat_node : ET.Element):
+            if feat_node.tag != prefix('Features'):
+                raise ValueError(f"Unexpected tag {feat_node.tag}. Expected 'Features'.")
+            for child in feat_node:
+                if child.tag == prefix('Location'):
+                    self.feature_locations.append(
+                       (read_float(child.attrib,'x'),
+                        read_float(child.attrib,'y'))
+                    )
+                    continue
+                elif child.tag == prefix('Circle'):
+                    shape = IPC2581_Circle()
+                elif child.tag == prefix('Line'):
+                    shape = IPC2581_Line()
+                elif child.tag == prefix('RectCenter'):
+                    shape = IPC2581_RectCenter()
+                elif child.tag == prefix('Oval'):
+                    shape = IPC2581_Oval()
+                elif child.tag == prefix('Arc'):
+                    shape = IPC2581_Arc()
+                elif child.tag == prefix('Contour'):
+                    shape = IPC2581_Contour()
+                elif child.tag == prefix('Polyline'):
+                    shape = IPC2581_Polyline()
+                else:
+                    raise ValueError(f"Unknown geometry type with tag {child.tag}")
+                shape.load(child)
+                self.features.append(shape)
+
+
+    def parse_Layer(self):
+        layer_node = self.root.find(prefix(f'Ecad/CadData/Layer[@name="{self.name}"]'))
+        if layer_node is None:
+            raise ValueError(f"Could not find layer {self.name} in <Layer> tags.")
+        self.function = layer_node.attrib['layerFunction']
+        self.side = layer_node.attrib['side']
+        self.polarity = layer_node.attrib['polarity']
+
+    def parse_StackupLayer(self,stackup=None,stackup_group=None):
+        """
+        :param stackup: stackup name, if more than one (not implemented)
+        :param stackup_group: stackup group name, if more than one (not implemented)
+        :return:
+        """
+        sl_node = self.root.find(prefix(f'Ecad/CadData/Stackup/StackupGroup/StackupLayer[@layerOrGroupRef="{self.name}"]'))
+        if sl_node is None:
+            print(f"Warning: Could not find layer {self.name} in <StackupLayer> tags in default group.")
+            return
+        self.thickness = read_float(sl_node.attrib,'thickness')
+        self.tolPlus = read_float(sl_node.attrib,'tolPlus')
+        self.tolMinus = read_float(sl_node.attrib,'tolMinus')
+        self.sequence = read_int(sl_node.attrib,'sequence')
+
+    def add_physical_net_point(self,phynetpoint_node : ET.Element):
+        """
+        Add a physical net point to the list for this layer.
+        A physial net point has:
+            position x,y
+            layerRef
+            netNode (END, MIDDLE)
+            exposure (COVERED_PRIMARY, COVERED_SECONDARY, EXPOSED)
+            via [bool]
+        :param phynetpoint_node:
+        :return: None
+        """
+        if phynetpoint_node.tag != prefix('PhyNetPoint'):
+            raise ValueError(f"Unexpected tag {phynetpoint_node.tag}. Expected PhyNetPoint.")
+        if phynetpoint_node.attrib['layerRef'] != self.name:
+            raise ValueError(f"Physical net point node does not correspond to layer {self.name}. Layer of node: {phynetpoint_node.attrib['layerRef']}")
+        pnp = IPC2581_Layer.PhysicalNetPoint()
+        pnp.position = (read_float(phynetpoint_node.attrib,'x'),
+                        read_float(phynetpoint_node.attrib,'y'))
+        pnp.net_node = phynetpoint_node.attrib['netNode']
+        pnp.exposure = phynetpoint_node.attrib['exposure']
+        pnp.via = read_bool(phynetpoint_node.attrib,'via')
+
+        primref_node = phynetpoint_node.find(prefix('StandardPrimitiveRef'))
+        if primref_node is not None:
+            pnp.primitive_ref = primref_node.attrib['id']
+
+        self.physical_net_points.append(pnp)
+
+    def parse_LayerFeature(self):
+        layerfeat_node = self.root.find(prefix(f'Ecad/CadData/Step/LayerFeature[@layerRef="{self.name}"]'))
+        if layerfeat_node is None:
+            print(f"Warning: Could not find LayerFeature node with layerRef={self.name}")
+            return
+        for set_node in layerfeat_node.findall(prefix('Set')):
+            if 'net' in set_node.attrib.keys():
+                net_name = set_node.attrib['net']
+                if net_name not in self.nets.keys():
+                    self.nets[net_name] = IPC2581_Layer.LayerNet(net_name)
+                layernet = self.nets[net_name]
+                feats_node = set_node.find(prefix('Features'))
+                if feats_node is not None:
+                    layernet.load_feature(feats_node)
+            # TODO handle <Set> tags without `net`
+
 class PCBAssembly:
     def __init__(self,root: ET.Element):
         self.root = root
-        self.function_mode = ''
-        self.step_ref = ''
-        self.bom_ref = ''
-        self.layer_refs = []
-        self.color_dictionary = {}  # 'id': (r,g,b)
-        self.line_desc_units = ''
+
+        # Content
+        self.function_mode = ''         # str, e.g. "ASSEMBLY"
+        self.function_mode_level = -1   # int, e.g. 3
+        self.step_ref = ''              # str, name attribute of <Step> tag
+        self.bom_ref = ''               # str, name attribute of <Bom> tag
+        self.layer_refs = []            # list of str, name attributes of <Layer> tags and similar (layer names)
+        self.color_dictionary = {}      # dict of tuples, color 'id': (r,g,b)
+        self.line_desc_units = ''       # units for DictionaryLineDesc
         self.line_desc_dictionary = {}  # 'id': {'lineEnd','lineWidth'}
+        self.fill_desc_units = ''       # units for DictionaryFillDesc
         self.fill_desc_dictionary = {}  # 'id': 'fillProperty'
-        self.standard_dict = {}
-        self.user_dict = {}
+        self.standard_dict_units = ''   # units for DictionaryStandard
+        self.standard_dict = {}         # standard dictionary
+        self.user_dict_units = ''       # units for DictionaryUser
+        self.user_dict = {}             # user dictionary
+
+        # Logistic Header
+        self.Role = {}                  # id, roleFunction
+        self.Enterprise = {}            # id, code
+        self.Person = {}                # name, enterpriseRef, roleRef
+
+        # Bom
+        self.Bom = None
+
+        # Layers
+        self.Layers = {}
+
+        # Components
+        self.Components = []
+
+        # Initialize
         self.rpf = '{http://webstds.ipc.org/2581}'  # root prefix
 
         self.parse_Content()
+        self.parse_LogisticHeader()
+        self.parse_Bom()
+        self.parse_HistoryRecord()
+        self.parse_Bom()
+        self.parse_ECad()
 
     def parse_Content(self,verbose=False):
         """
@@ -260,7 +577,6 @@ class PCBAssembly:
          - DictionaryStandard
          - DictionaryUser
          We can parse the function mode, step ref, BOM ref, and layer refs
-         Dictionaries can wait.
 
         :return: None
         """
@@ -268,7 +584,10 @@ class PCBAssembly:
             print("Parsing function mode, step ref, bom ref, layer ref... ", end='')
         fm_node = self.root.find(prefix('Content/FunctionMode'))
         if fm_node is not None:
-            self.function_mode = fm_node.attrib['mode']
+            if 'mode' in fm_node.attrib:
+                self.function_mode = fm_node.attrib['mode']
+            if 'level' in fm_node.attrib:
+                self.function_mode_level = read_int(fm_node.attrib,'level')
 
         sr_node = self.root.find(prefix('Content/StepRef'))
         if sr_node is not None:
@@ -306,6 +625,34 @@ class PCBAssembly:
         if verbose:
             print("Done")
 
+    def parse_LogisticHeader(self):
+        role_node = self.root.find(prefix('LogisticHeader/Role'))
+        if role_node is not None:
+            self.Role = role_node.attrib  # id, roleFunction
+
+        enterprise_node = self.root.find(prefix('LogisticHeader/Enterprise'))
+        if enterprise_node is not None:
+            self.Enterprise = enterprise_node.attrib  # id, code
+
+        person_node = self.root.find(prefix('LogisticHeader/Person'))
+        if person_node is not None:
+            self.Person = person_node.attrib  # name, enterpriseRef, roleRef
+
+    def parse_HistoryRecord(self):
+        pass
+
+    def parse_Bom(self):
+        bomnode = self.root.find(prefix('Bom'))
+        if bomnode is not None:
+            self.Bom = IPC2581_Bom()
+            self.Bom.load(bomnode)
+
+    def parse_ECad(self):
+        # Construct Layer objects for each layer
+        # Parsing is done automatically
+        for layer_name in self.layer_refs:
+            self.Layers[layer_name] = IPC2581_Layer(self.root,layer_name)
+
     def _parse_color_dict(self):
         # Color dictionary
         entry_color_nodes = self.root.findall(prefix('Content/DictionaryColor/EntryColor'))
@@ -320,7 +667,8 @@ class PCBAssembly:
         # Line description dictionary
         ldu_node = self.root.find(prefix('Content/DictionaryLineDesc'))
         if ldu_node is not None:
-            self.line_desc_units = ldu_node.attrib['units']
+            if 'units' in ldu_node.attrib.keys():
+                self.line_desc_units = ldu_node.attrib['units']
         entry_line_desc_nodes = self.root.findall(prefix('Content/DictionaryLineDesc/EntryLineDesc'))
         for entry in entry_line_desc_nodes:
             if entry is not None:
@@ -335,7 +683,11 @@ class PCBAssembly:
 
     def _parse_fill_desc_dict(self):
         # Fill description dictionary
-        fill_desc_nodes = self.root.findall(prefix('Content/EntryFillDesc'))
+        dfd_node = self.root.find(prefix('Content/DictionaryFillDesc'))
+        if dfd_node is not None:
+            if 'units' in dfd_node.attrib.keys():
+                self.fill_desc_units = dfd_node.attrib['units']
+        fill_desc_nodes = self.root.findall(prefix('Content/DictionaryFillDesc/EntryFillDesc'))
         for fill in fill_desc_nodes:
             if fill is not None:
                 fill_id = fill.attrib['id']
@@ -345,6 +697,10 @@ class PCBAssembly:
 
     def _parse_standard_dict(self):
         # Standard dictionary
+        dstd_node = self.root.find(prefix('Content/DictionaryStandard'))
+        if dstd_node is not None:
+            if 'units' in dstd_node.attrib.keys():
+                self.standard_dict_units = dstd_node.attrib['units']
         entry_standard_nodes = self.root.findall(prefix('Content/DictionaryStandard/EntryStandard'))
         for es_node in entry_standard_nodes:
             es_id = es_node.attrib['id']
@@ -377,6 +733,10 @@ class PCBAssembly:
 
     def _parse_user_dict(self):
         # User dictionary
+        dusr_node = self.root.find(prefix('Content/DictionaryStandard'))
+        if dusr_node is not None:
+            if 'units' in dusr_node.attrib.keys():
+                self.user_dict_units = dusr_node.attrib['units']
         entry_user_nodes = self.root.findall(prefix('Content/DictionaryUser/EntryUser'))
         for eu_node in entry_user_nodes:
             eu_id = eu_node.attrib['id']
@@ -387,78 +747,6 @@ class PCBAssembly:
                 self.user_dict[eu_id] = us_obj
 
 
-
-
-def get_layer_list(root: ET.Element):
-    """
-    Return a list of layers in dictionary format for this document
-
-    Parameters
-    ----------
-    root : ET.Element
-
-    Returns
-    -------
-    List of layer dictionaries with elements:
-        name            Layer name
-        layerFunction   Layer function as a string, one of {'DRILL', 'DOCUMENT', 'PASTEMASK', 'LEGEND', 'SOLDERMASK', 'SIGNAL', 'DIELCORE'}
-        side            PCB side, one of {'TOP', 'BOTTOM', 'INTERNAL'}
-        polarity        Layer drawing polarity, one of {'POSITIVE','NEGATIVE'}
-        thickness       Layer thickness as float
-        sequence        Layer sequence position as int
-        z               Layer z position as float (bottom is z=0)
-
-    """
-    rpf = '{http://webstds.ipc.org/2581}'  # Root prefix
-    # Get layer names and functions
-    layer_refs = root.findall(f'{rpf}Content/{rpf}LayerRef')
-    layers = root.findall(f'{rpf}Ecad/{rpf}CadData/{rpf}Layer')
-    layers = [l.attrib for l in layers]
-
-    # Get layer thicknesses
-    for layer in layers:
-        name = layer['name']
-        stackuplayer = root.find(
-            f'{rpf}Ecad/{rpf}CadData/{rpf}Stackup/{rpf}StackupGroup/{rpf}StackupLayer[@layerOrGroupRef="{name}"]')
-        if stackuplayer is not None:
-            layer['thickness'] = float(stackuplayer.attrib['thickness'])
-            layer['sequence'] = int(stackuplayer.attrib['sequence'])
-        else:
-            layer['thickness'] = 0.0
-            layer['sequence'] = -1
-
-    thicknesses = [layer['thickness'] for layer in layers]
-    zpos = np.cumsum(-np.array(thicknesses)) + np.sum(thicknesses)
-    for i, layer in enumerate(layers):
-        layer['z'] = np.around(zpos[i], decimals=6)
-
-    return layers
-
-
-def get_layer_net_list(root: ET.Element, layername: str):
-    """
-    Return list of layer nets (as strings) given root and layer name
-
-    Parameters
-    ----------
-    root : ET.Element
-    layername : str
-
-    Returns
-    -------
-    None.
-
-    """
-    rpf = '{http://webstds.ipc.org/2581}'  # Root prefix
-    LayerFeatureRoot = root.find(f'{rpf}Ecad/{rpf}CadData/{rpf}Step/{rpf}LayerFeature[@layerRef="{layername}"]')
-    LayerSets = LayerFeatureRoot.findall(f'{rpf}Set')
-    netnames = []
-    for lset in LayerSets:
-        if 'net' in lset.attrib.keys():
-            #if lset.attrib['net'] != 'No Net':
-            netnames.append(lset.attrib['net'])
-    netnames = list(set(netnames))
-    return netnames
 
 if __name__ == '__main__':
     fname = 'examples/BeagleBone_Black_RevB6_nologo174-AllegroOut/BeagleBone_Black_RevB6_nologo174.xml'
