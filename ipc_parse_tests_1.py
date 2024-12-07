@@ -968,38 +968,49 @@ class PCBAssembly:
                 self.user_dict[eu_id] = us_obj
 
 
-def draw_polyline(polyline: IPC2581_Polyline, ax, canvas, color='k'):
-    pts_x = [pt[0] for pt in polyline.points]
-    pts_y = [pt[1] for pt in polyline.points]
-    # if a straigth line, connections is None
-    # if curved, connections is an IPC2581_PolyStepCurve
-    for i,conn in enumerate(polyline.connections):
-        if conn is None:
-            # Draw from here to next point
-            print(f'{pts_x[i:i+2]}, {pts_y[i:i+2]}')
-            ax.plot(pts_x[i:i+2], pts_y[i:i+2],color=color)  # +2 for slicing
-        else:
-            # Draw curved segment
-            pass
-    canvas.draw()
+# For testing:
+# def draw_polyline(polyline: IPC2581_Polyline, ax, canvas, color='k'):
+#     pts_x = [pt[0] for pt in polyline.points]
+#     pts_y = [pt[1] for pt in polyline.points]
+#     # if a straigth line, connections is None
+#     # if curved, connections is an IPC2581_PolyStepCurve
+#     for i,conn in enumerate(polyline.connections):
+#         if conn is None:
+#             # Draw from here to next point
+#             print(f'{pts_x[i:i+2]}, {pts_y[i:i+2]}')
+#             ax.plot(pts_x[i:i+2], pts_y[i:i+2],color=color)  # +2 for slicing
+#         else:
+#             # Draw curved segment
+#             pass
+#     canvas.draw()
+#
+# def draw_pkg(pkg: IPC2581_Package):
+#     fig,(ax) = plt.subplots(1,1,figsize=(8,8))
+#     # for mark in pkg.asm_dwg_markings:
+#     #     print("Marking")
+#     #     draw_polyline(mark.polyline,ax,fig.canvas,color=None)
+#     for mark in pkg.silkscreen_markings:
+#         print("Marking")
+#         if mark.polyline is not None:
+#             draw_polyline(mark.polyline,ax,fig.canvas,color='y')
+#         elif mark.contour is not None:
+#             draw_polyline(mark.contour,ax,fig.canvas,color='b')
+#     ax.set_aspect(1)
 
-def draw_pkg(pkg: IPC2581_Package):
-    fig,(ax) = plt.subplots(1,1,figsize=(8,8))
-    # for mark in pkg.asm_dwg_markings:
-    #     print("Marking")
-    #     draw_polyline(mark.polyline,ax,fig.canvas,color=None)
-    for mark in pkg.silkscreen_markings:
-        print("Marking")
-        if mark.polyline is not None:
-            draw_polyline(mark.polyline,ax,fig.canvas,color='y')
-        elif mark.contour is not None:
-            draw_polyline(mark.contour,ax,fig.canvas,color='b')
-    ax.set_aspect(1)
-
-
-# %%
 
 if __name__ == '__main__':
+    """
+    STATUS
+    ===========
+    Package is finished
+    Basic geometry tags are finished
+    LayerFeature is probably most of the way there, check for Hole?
+    Layer objects need the pads for the components, as well as vias
+    Layer objects need to handle Set tags without net names
+    Datum and Profile have not been implemented
+    PadStack has not been implemented (I still don't fully understand it)
+    Rendering!
+    """
     fname = 'examples/BeagleBone_Black_RevB6_nologo174-AllegroOut/BeagleBone_Black_RevB6_nologo174.xml'
     # fname = 'examples/testcase10-Rev C data/testcase10-RevC-Full.xml'
     print("Loading file... ",end='')
@@ -1008,8 +1019,8 @@ if __name__ == '__main__':
     print("Done")
     test_pcb = PCBAssembly(root)
     
-    # %%
-    pkg_name = 'SD-MICRO-SCHA5B0300'
-    pkg_name = '0402'
-    pkg_name = 'BGA153_P14_P5_11P5X13'
-    draw_pkg(test_pcb.Packages[pkg_name])
+    # For testing:
+    # pkg_name = 'SD-MICRO-SCHA5B0300'
+    # pkg_name = '0402'
+    # pkg_name = 'BGA153_P14_P5_11P5X13'
+    # draw_pkg(test_pcb.Packages[pkg_name])
