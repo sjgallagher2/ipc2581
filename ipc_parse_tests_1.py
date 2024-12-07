@@ -1,5 +1,6 @@
 import xml.etree.ElementTree as ET
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def prefix(s: str, rpf: str = '{http://webstds.ipc.org/2581}'):
@@ -189,6 +190,7 @@ class IPC2581_Contour:
     """
     A contour has a list of coordinates creating a closed shape, with fill style
     Some coordinates are connected by lines, others are connected by curves with a center point
+    Outline are special types of contours
     """
     def __init__(self, points: list[tuple[float,float], ...] = None,
                  connections: list[IPC2581_PolyStepCurve, ...] = None, fill_desc_ref = ''):
@@ -197,8 +199,8 @@ class IPC2581_Contour:
         self.fill_desc_ref = fill_desc_ref
 
     def load(self, ct_node: ET.Element):
-        if ct_node.tag != prefix('Contour'):
-            raise ValueError(f'Expected Contour tag, instead got {ct_node.tag}')
+        if ct_node.tag not in (prefix('Contour'),prefix('Outline')):
+            raise ValueError(f'Expected Contour or Outline tag, instead got {ct_node.tag}')
         poly_node = ct_node.find(prefix('Polygon'))
         if poly_node is not None:
             for pnode in poly_node:
@@ -248,6 +250,7 @@ class IPC2581_Polyline:
             elif pnode.tag == prefix('LineDesc'):
                 self.lineEnd = pnode.attrib['lineEnd']
                 self.lineWidth = read_float(pnode.attrib,'lineWidth')
+
 
 class IPC2581_UserSpecial:
     """
@@ -451,7 +454,6 @@ class IPC2581_Layer:
                 shape.load(child)
                 self.features.append(shape)
 
-
     def parse_Layer(self):
         layer_node = self.root.find(prefix(f'Ecad/CadData/Layer[@name="{self.name}"]'))
         if layer_node is None:
@@ -520,6 +522,212 @@ class IPC2581_Layer:
                     layernet.load_feature(feats_node)
             # TODO handle <Set> tags without `net`
 
+class IPC2581_Package:
+    def __init__(self,root: ET.Element, name: str):
+        self.root = root
+        self.name = name
+        self.type = ''
+        self.pinOne = ''
+        self.pinOneOrientation = ''
+        self.height = 0.00
+
+        # Outline
+        self.outline = None
+        self.lineWidth = 0.0
+        self.lineEnd = ''
+
+        # PickupPoint
+        self.PickupPoint = (0.0, 0.0)
+
+        # SilkScreen
+        self.silkscreen_markings = []
+
+        # AssemblyDrawing
+        self.asm_dwg_outline = None
+        self.asm_dwg_lineEnd = ''
+        self.asm_dwg_lineWidth = 0.0
+        self.asm_dwg_markings = []
+
+        # Pins
+        self.pins = []
+
+        # LandingPattern
+        self.land_pads = []
+
+    class IPC2581_Marking:
+        def __init__(self):
+            self.usage = ''
+            self.loc = (0.0, 0.0)
+            self.polyline = None
+            self.contour = None
+
+        def load(self,marking_node: ET.Element):
+            if marking_node.tag != prefix('Marking'):
+                raise ValueError(f'Expected Marking tag, instead got {marking_node.tag}.')
+            self.usage = marking_node.attrib['markingUsage']
+            loc_node = marking_node.find(prefix('Location'))
+            if loc_node is not None:
+                x = read_float(loc_node.attrib,'x')
+                y = read_float(loc_node.attrib,'y')
+                self.loc = (x,y)
+
+            poly_node = marking_node.find(prefix('Polyline'))
+            if poly_node is not None:
+                self.polyline = IPC2581_Polyline()
+                self.polyline.load(poly_node)
+
+            contour_node = marking_node.find(prefix('Contour'))
+            if contour_node is not None:
+                self.contour = IPC2581_Contour()
+                self.contour.load(contour_node)
+
+    class IPC2581_Pin:
+        def __init__(self):
+            self.number = ''  # str to support letter-number pins e.g. B9
+            self.type = ''
+            self.electricalType = ''
+            self.loc = (0.0, 0.0)
+            self.std_prim_ref = ''
+
+        def load(self,pin_node: ET.Element):
+            if pin_node.tag != prefix('Pin'):
+                raise ValueError(f'Expected Pin tag, instead got {pin_node.tag}.')
+            self.number = pin_node.attrib['number']
+            self.type = pin_node.attrib['type']
+            self.electricalType = pin_node.attrib['electricalType']
+
+            loc_node = pin_node.find(prefix('Location'))
+            if loc_node is not None:
+                x = read_float(loc_node.attrib,'x')
+                y = read_float(loc_node.attrib,'y')
+                self.loc = (x,y)
+
+            spr_node = pin_node.find(prefix('StandardPrimitiveRef'))
+            if spr_node is not None:
+                self.std_prim_ref = spr_node.attrib['id']
+
+    class IPC2581_Pad:
+        def __init__(self):
+            self.padstackDefRef = ''
+            self.loc = (0.0, 0.0)
+            self.std_prim_ref = ''
+            self.pin = ''
+
+        def load(self,pad_node: ET.Element):
+            if pad_node.tag != prefix('Pad'):
+                raise ValueError(f'Expected Pin tag, instead got {pad_node.tag}.')
+            self.padstackDefRef = pad_node.attrib['padstackDefRef']
+
+            loc_node = pad_node.find(prefix('Location'))
+            if loc_node is not None:
+                x = read_float(loc_node.attrib,'x')
+                y = read_float(loc_node.attrib,'y')
+                self.loc = (x,y)
+
+            spr_node = pad_node.find(prefix('StandardPrimitiveRef'))
+            if spr_node is not None:
+                self.std_prim_ref = spr_node.attrib['id']
+
+            pinref_node = pad_node.find(prefix('PinRef'))
+            if pinref_node is not None:
+                self.pin = pinref_node.attrib['pin']
+
+    def parse_Package(self):
+        pkg_node = self.root.find(prefix(f'Ecad/CadData/Step/Package[@name="{self.name}"]'))
+        if pkg_node is None:
+            print(f"Warning: Could not find Package with name {self.name}")
+            return
+        self.type = pkg_node.attrib['type']
+        self.pinOne = pkg_node.attrib['pinOne']
+        self.pinOneOrientation = pkg_node.attrib['pinOneOrientation']
+        self.height = read_float(pkg_node.attrib,'height')
+
+        outline_node = pkg_node.find(prefix('Outline'))
+        if outline_node is None:
+            print(f"Warning: Package with name {self.name} did not have an Outline.")
+        else:
+            self._parse_Outline(outline_node)
+
+        pickup_node = pkg_node.find(prefix('PickupPoint'))
+        if pickup_node is not None:
+            x = read_float(pickup_node.attrib,'x')
+            y = read_float(pickup_node.attrib,'x')
+            self.PickupPoint = (x,y)
+
+        ss_node = pkg_node.find(prefix('SilkScreen'))
+        if ss_node is None:
+            print(f"Warning: Package with name {self.name} does not have a SilkScreen.")
+        else:
+            self._parse_SilkScreen(ss_node)
+
+        asm_dwg_node = pkg_node.find(prefix('AssemblyDrawing'))
+        if asm_dwg_node is None:
+            print(f"Warning: Package with name {self.name} does not have an AssemblyDrawing.")
+        else:
+            self._parse_AssemblyDrawing(asm_dwg_node)
+
+        # Parse Pin nodes
+        pin_nodes = pkg_node.findall(prefix('Pin'))
+        for pin_node in pin_nodes:
+            pin = IPC2581_Package.IPC2581_Pin()
+            pin.load(pin_node)
+            self.pins.append(pin)
+
+        # Finally, parse the LandPattern
+        land_node = pkg_node.find(prefix('LandPattern'))
+        if land_node is None:
+            print(f"Warning: Package with name {self.name} does not have a LandPattern.")
+        else:
+            pad_nodes = land_node.findall(prefix('Pad'))
+            for pad_node in pad_nodes:
+                pad = IPC2581_Package.IPC2581_Pad()
+                pad.load(pad_node)
+                self.land_pads.append(pad)
+
+    def _parse_Outline(self, outline_node: ET.Element):
+        if outline_node.tag != prefix('Outline'):
+            raise ValueError(f'Expected Outline tag, instead got {outline_node.tag}.')
+        self.outline = IPC2581_Contour()
+        self.outline.load(outline_node)
+        ld_node = outline_node.find(prefix('LineDesc'))
+        if ld_node is not None:
+            self.lineEnd = ld_node.attrib['lineEnd']
+            self.lineWidth = read_float(ld_node.attrib,'lineWidth')
+
+    def _parse_SilkScreen(self, silkscreen_node: ET.Element):
+        if silkscreen_node.tag != prefix('SilkScreen'):
+            raise ValueError(f'Expected SilkScreen tag, instead got {silkscreen_node.tag}.')
+
+        marking_nodes = silkscreen_node.findall(prefix('Marking'))
+        for mn in marking_nodes:
+            marking = IPC2581_Package.IPC2581_Marking()
+            marking.load(mn)
+            self.silkscreen_markings.append(marking)
+
+    def _parse_AssemblyDrawing(self, asm_dwg_node: ET.Element):
+        if asm_dwg_node.tag != prefix('AssemblyDrawing'):
+            raise ValueError(f'Expected AssemblyDrawing tag, instead got {asm_dwg_node.tag}.')
+        outline_node = asm_dwg_node.find(prefix('Outline'))
+        if outline_node.tag != prefix('Outline'):
+            raise ValueError(f'Expected Outline tag, instead got {outline_node.tag}.')
+        self.asm_dwg_outline = IPC2581_Contour()
+        self.asm_dwg_outline.load(outline_node)
+        ld_node = outline_node.find(prefix('LineDesc'))
+        if ld_node is not None:
+            self.asm_dwg_lineEnd = ld_node.attrib['lineEnd']
+            self.asm_dwg_lineWidth = read_float(ld_node.attrib,'lineWidth')
+
+        # Next get markings
+        marking_nodes = asm_dwg_node.findall(prefix('Marking'))
+        for mn in marking_nodes:
+            marking = IPC2581_Package.IPC2581_Marking()
+            marking.load(mn)
+            self.asm_dwg_markings.append(marking)
+
+
+
+
+
 class PCBAssembly:
     def __init__(self,root: ET.Element):
         self.root = root
@@ -553,6 +761,9 @@ class PCBAssembly:
 
         # Components
         self.Components = []
+
+        # Packages
+        self.Packages = {}
 
         # Initialize
         self.rpf = '{http://webstds.ipc.org/2581}'  # root prefix
@@ -653,6 +864,16 @@ class PCBAssembly:
         for layer_name in self.layer_refs:
             self.Layers[layer_name] = IPC2581_Layer(self.root,layer_name)
 
+        # Load packages
+        package_names = []
+        package_nodes = root.findall(prefix('Ecad/CadData/Step/Package'))
+        for pn in package_nodes:
+            package_names.append(pn.attrib['name'])
+        for pn in package_names:
+            pcbpkg = IPC2581_Package(root,pn)
+            pcbpkg.parse_Package()
+            self.Packages[pn] = pcbpkg
+
     def _parse_color_dict(self):
         # Color dictionary
         entry_color_nodes = self.root.findall(prefix('Content/DictionaryColor/EntryColor'))
@@ -747,6 +968,36 @@ class PCBAssembly:
                 self.user_dict[eu_id] = us_obj
 
 
+def draw_polyline(polyline: IPC2581_Polyline, ax, canvas, color='k'):
+    pts_x = [pt[0] for pt in polyline.points]
+    pts_y = [pt[1] for pt in polyline.points]
+    # if a straigth line, connections is None
+    # if curved, connections is an IPC2581_PolyStepCurve
+    for i,conn in enumerate(polyline.connections):
+        if conn is None:
+            # Draw from here to next point
+            print(f'{pts_x[i:i+2]}, {pts_y[i:i+2]}')
+            ax.plot(pts_x[i:i+2], pts_y[i:i+2],color=color)  # +2 for slicing
+        else:
+            # Draw curved segment
+            pass
+    canvas.draw()
+
+def draw_pkg(pkg: IPC2581_Package):
+    fig,(ax) = plt.subplots(1,1,figsize=(8,8))
+    # for mark in pkg.asm_dwg_markings:
+    #     print("Marking")
+    #     draw_polyline(mark.polyline,ax,fig.canvas,color=None)
+    for mark in pkg.silkscreen_markings:
+        print("Marking")
+        if mark.polyline is not None:
+            draw_polyline(mark.polyline,ax,fig.canvas,color='y')
+        elif mark.contour is not None:
+            draw_polyline(mark.contour,ax,fig.canvas,color='b')
+    ax.set_aspect(1)
+
+
+# %%
 
 if __name__ == '__main__':
     fname = 'examples/BeagleBone_Black_RevB6_nologo174-AllegroOut/BeagleBone_Black_RevB6_nologo174.xml'
@@ -756,4 +1007,9 @@ if __name__ == '__main__':
     root = tree.getroot()
     print("Done")
     test_pcb = PCBAssembly(root)
-
+    
+    # %%
+    pkg_name = 'SD-MICRO-SCHA5B0300'
+    pkg_name = '0402'
+    pkg_name = 'BGA153_P14_P5_11P5X13'
+    draw_pkg(test_pcb.Packages[pkg_name])
