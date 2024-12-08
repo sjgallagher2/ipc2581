@@ -186,21 +186,52 @@ class IPC2581_PolyStepCurve:
         self.clockwise = clockwise
 
 
+class IPC2581_Polygon:
+    """
+    A polygon has a list of coordinates creating a closed shape.
+    Some coordinates are connected by lines, others are connected by curves with a center point.
+    Polygons are used by <Contour>, <Outline>, and <Profile> tags, among others?
+    """
+    def __init__(self):
+        self.points = []
+        self.connections = []
+
+    def load(self, poly_node: ET.Element):
+        if poly_node.tag != prefix('Polygon'):
+            raise ValueError(f'Expected Polygon tag, instead got {poly_node.tag}')
+        if poly_node is not None:
+            for pnode in poly_node:
+                if pnode.tag == prefix('PolyBegin'):
+                    self.points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                elif pnode.tag == prefix('PolyStepSegment'):
+                    self.points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                    self.connections.append(None)
+                elif pnode.tag == prefix('PolyStepCurve'):
+                    self.points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                    self.connections.append(IPC2581_PolyStepCurve(
+                        center=( float(pnode.attrib['centerX']), float(pnode.attrib['centerY']) ),
+                        clockwise = pnode.attrib['clockwise'] == 'true'
+                    ))
+
+
+
 class IPC2581_Contour:
     """
     A contour has a list of coordinates creating a closed shape, with fill style
     Some coordinates are connected by lines, others are connected by curves with a center point
-    Outline are special types of contours
+    Contours can have one Polygon node and zero or more Cutout nodes
     """
     def __init__(self, points: list[tuple[float,float], ...] = None,
                  connections: list[IPC2581_PolyStepCurve, ...] = None, fill_desc_ref = ''):
         self.points = points or []
         self.connections = connections or []
+        self.cutout_points = []
+        self.cutout_connections = []
         self.fill_desc_ref = fill_desc_ref
 
     def load(self, ct_node: ET.Element):
-        if ct_node.tag not in (prefix('Contour'),prefix('Outline')):
-            raise ValueError(f'Expected Contour or Outline tag, instead got {ct_node.tag}')
+        if ct_node.tag != prefix('Contour'):
+            raise ValueError(f'Expected Contour tag, instead got {ct_node.tag}')
         poly_node = ct_node.find(prefix('Polygon'))
         if poly_node is not None:
             for pnode in poly_node:
@@ -217,6 +248,21 @@ class IPC2581_Contour:
                     ))
                 elif pnode.tag == prefix('FillDescRef'):
                     self.fill_desc_ref = pnode.attrib['id']
+        cutout_nodes = ct_node.findall(prefix('Cutout'))
+        for cutout_node in cutout_nodes:
+            for pnode in cutout_node:
+                if pnode.tag == prefix('PolyBegin'):
+                    self.cutout_points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                elif pnode.tag == prefix('PolyStepSegment'):
+                    self.cutout_points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                    self.cutout_connections.append(None)
+                elif pnode.tag == prefix('PolyStepCurve'):
+                    self.cutout_points.append( (float(pnode.attrib['x']), float(pnode.attrib['y'])) )
+                    self.cutout_connections.append(IPC2581_PolyStepCurve(
+                        center=( float(pnode.attrib['centerX']), float(pnode.attrib['centerY']) ),
+                        clockwise = pnode.attrib['clockwise'] == 'true'
+                    ))
+
 
 
 class IPC2581_Polyline:
@@ -285,6 +331,36 @@ class IPC2581_UserSpecial:
 
             shape.load(shape_node)
             self.shapes.append(shape)
+
+
+class IPC2581_Pad:
+    def __init__(self):
+        self.padstackDefRef = ''
+        self.loc = (0.0, 0.0)
+        self.std_prim_ref = ''
+        self.pin = ''  # Not all Pads have this
+        self.pin_componentRef = ''  # LandPattern pads don't have this
+
+    def load(self,pad_node: ET.Element):
+        if pad_node.tag != prefix('Pad'):
+            raise ValueError(f'Expected Pad tag, instead got {pad_node.tag}.')
+        self.padstackDefRef = pad_node.attrib['padstackDefRef']
+
+        loc_node = pad_node.find(prefix('Location'))
+        if loc_node is not None:
+            x = read_float(loc_node.attrib,'x')
+            y = read_float(loc_node.attrib,'y')
+            self.loc = (x,y)
+
+        spr_node = pad_node.find(prefix('StandardPrimitiveRef'))
+        if spr_node is not None:
+            self.std_prim_ref = spr_node.attrib['id']
+
+        pinref_node = pad_node.find(prefix('PinRef'))
+        if pinref_node is not None:
+            self.pin = pinref_node.attrib['pin']
+            if 'componentRef' in pinref_node.attrib.keys():
+                self.pin_componentRef = pinref_node.attrib['componentRef']
 
 
 class IPC2581_BomItem:
@@ -404,11 +480,42 @@ class IPC2581_Layer:
 
         # from <LayerFeature> tag
         self.nets = {}  # netname : LayerNet
+        self.nonet_geom = []
+        self.vias = []
+        self.pads_not_used = []
 
+        # from <Component> tags
+        self.components = []
 
         self.parse_Layer()
         self.parse_StackupLayer()
         self.parse_LayerFeature()
+        self.parse_Components()
+
+    class NetVia:
+        def __init__(self):
+            self.pad = None  # IPC2581_Pad
+            self.nonstd_attrib = {}
+            self.plate = False
+            self.testPoint = False
+        def load(self,set_node: ET.Element):
+            if set_node.tag != prefix('Set'):
+                raise ValueError(f"Expected Set tag, instead got {set_node.tag}")
+            if 'padUsage' not in set_node.attrib.keys():
+                print("WARNING: Attempting to parse via without padUsage attribute. This is probably a mistake.")
+            if set_node.attrib['padUsage'] not in ['VIA','NONE']:
+                print(f"WARNING: Attempting to parse via with padUsage={set_node.attrib['padUsage']} instead of VIA or NONE")
+            if 'plate' in set_node.attrib.keys():
+                self.plate = set_node.attrib['plate'] == 'true'
+            if 'testPoint' in set_node.attrib.keys():
+                self.testPoint = set_node.attrib['testPoint'] == 'true'
+            pad_node = set_node.find(prefix('Pad'))
+            if pad_node is not None:
+                self.pad = IPC2581_Pad()
+                self.pad.load(pad_node)
+            nonstd_attrs = set_node.findall(prefix('NonstandardAttribute'))
+            for nonstd in nonstd_attrs:
+                self.nonstd_attrib[nonstd.attrib['name']] = nonstd.attrib['value']
 
     class PhysicalNetPoint:
         def __init__(self):
@@ -419,11 +526,56 @@ class IPC2581_Layer:
             self.via = False
             self.primitive_ref = ''
 
+    class IPC2581_Component:
+        def __init__(self):
+            self.refDes = ''
+            self.packageRef = ''
+            # self.layerRef = ''  # Components are owned by layers so this isn't needed
+            self.part = ''
+            self.mountType = ''
+            self.standoff = 0.0
+            self.height = 0.0
+            self.nonstd_attrib = {}
+            self.loc = (0.0, 0.0)
+            self.Xform = None # IPC2581_Transform()
+
+        def load(self,comp_node: ET.Element):
+            self.refDes = comp_node.attrib['refDes']
+            self.packageRef = comp_node.attrib['packageRef']
+            self.part = comp_node.attrib['part']
+            self.mountType = comp_node.attrib['mountType']
+            self.standoff = read_float(comp_node.attrib,'standoff')
+            self.height = read_float(comp_node.attrib,'height')
+
+            loc_node = comp_node.find(prefix('Location'))
+            if loc_node is not None:
+                x = read_float(loc_node.attrib,'x')
+                y = read_float(loc_node.attrib,'y')
+                self.loc = (x,y)
+
+            xform_node = comp_node.find(prefix('Xform'))
+            if xform_node is not None:
+                self.Xform = IPC2581_Transform()
+                self.Xform.load(xform_node)
+
+            nonstd_nodes = comp_node.findall(prefix('NonstandardAttribute'))
+            for nonstd in nonstd_nodes:
+                self.nonstd_attrib[nonstd.attrib['name']] = nonstd.attrib['value']
+
+
     class LayerNet:
+        """
+        <Set> tags group layer net features
+        Some sets have a componentRef (reference designator for component)
+        Set nodes might not have an associated net (e.g. text)
+        Set nodes can have <NonstandardAttribute>s
+        A <Set> node representing a test point or via has additional attributes
+        """
         def __init__(self,name):
             self.name = name
             self.feature_locations = []  # (x,y) coordinates
             self.features = []  # IPC2581_xyz features
+            self.Xform = None
 
         def load_feature(self, feat_node : ET.Element):
             if feat_node.tag != prefix('Features'):
@@ -434,6 +586,13 @@ class IPC2581_Layer:
                        (read_float(child.attrib,'x'),
                         read_float(child.attrib,'y'))
                     )
+                    continue
+                elif child.tag == prefix('Xform'):
+                    self.Xform = IPC2581_Transform()
+                    self.Xform.load(child)
+                    continue
+                elif child.tag == prefix('UserPrimitiveRef'):
+                    self.features.append(child.attrib['id'])
                     continue
                 elif child.tag == prefix('Circle'):
                     shape = IPC2581_Circle()
@@ -447,6 +606,8 @@ class IPC2581_Layer:
                     shape = IPC2581_Arc()
                 elif child.tag == prefix('Contour'):
                     shape = IPC2581_Contour()
+                elif child.tag == prefix('Polygon'):
+                    shape = IPC2581_Polygon()
                 elif child.tag == prefix('Polyline'):
                     shape = IPC2581_Polyline()
                 else:
@@ -514,13 +675,45 @@ class IPC2581_Layer:
         for set_node in layerfeat_node.findall(prefix('Set')):
             if 'net' in set_node.attrib.keys():
                 net_name = set_node.attrib['net']
-                if net_name not in self.nets.keys():
-                    self.nets[net_name] = IPC2581_Layer.LayerNet(net_name)
-                layernet = self.nets[net_name]
+                if 'padUsage' in set_node.attrib.keys():
+                    # This is a pad or via
+                    if set_node.attrib['padUsage'] == 'VIA':
+                        via = IPC2581_Layer.NetVia()
+                        via.load(set_node)
+                        self.vias.append(via)
+                    elif set_node.attrib['padUsage'] == 'NONE':
+                        pad_not_used = IPC2581_Layer.NetVia()
+                        pad_not_used.load(set_node)
+                        self.pads_not_used.append(pad_not_used)
+                elif 'geometry' in set_node.attrib.keys():
+                    # TODO: Hole or SlotCavity
+                    pass
+                else:
+                    # This is just the layer's net geometry, parse each feature
+                    # Make sure this net is in the `nets` dictionary
+                    if net_name not in self.nets.keys():
+                        self.nets[net_name] = IPC2581_Layer.LayerNet(net_name)
+                    # Parse
+                    layernet = self.nets[net_name]
+                    feats_node = set_node.find(prefix('Features'))
+                    if feats_node is not None:
+                        layernet.load_feature(feats_node)
+            else:
+                # No-net geometry (e.g. text)
+                # ColorRef node
+                nonet = IPC2581_Layer.LayerNet('')
                 feats_node = set_node.find(prefix('Features'))
                 if feats_node is not None:
-                    layernet.load_feature(feats_node)
-            # TODO handle <Set> tags without `net`
+                    nonet.load_feature(feats_node)
+                    self.nonet_geom.append(nonet)
+
+    def parse_Components(self):
+        comp_nodes = self.root.findall(prefix(f'Ecad/CadData/Step/Component[@layerRef="{self.name}"]'))
+        for comp_node in comp_nodes:
+            component = IPC2581_Layer.IPC2581_Component()
+            component.load(comp_node)
+            self.components.append(component)
+
 
 class IPC2581_Package:
     def __init__(self,root: ET.Element, name: str):
@@ -533,8 +726,8 @@ class IPC2581_Package:
 
         # Outline
         self.outline = None
-        self.lineWidth = 0.0
-        self.lineEnd = ''
+        self.outline_lineWidth = 0.0
+        self.outline_lineEnd = ''
 
         # PickupPoint
         self.PickupPoint = (0.0, 0.0)
@@ -606,32 +799,6 @@ class IPC2581_Package:
             if spr_node is not None:
                 self.std_prim_ref = spr_node.attrib['id']
 
-    class IPC2581_Pad:
-        def __init__(self):
-            self.padstackDefRef = ''
-            self.loc = (0.0, 0.0)
-            self.std_prim_ref = ''
-            self.pin = ''
-
-        def load(self,pad_node: ET.Element):
-            if pad_node.tag != prefix('Pad'):
-                raise ValueError(f'Expected Pin tag, instead got {pad_node.tag}.')
-            self.padstackDefRef = pad_node.attrib['padstackDefRef']
-
-            loc_node = pad_node.find(prefix('Location'))
-            if loc_node is not None:
-                x = read_float(loc_node.attrib,'x')
-                y = read_float(loc_node.attrib,'y')
-                self.loc = (x,y)
-
-            spr_node = pad_node.find(prefix('StandardPrimitiveRef'))
-            if spr_node is not None:
-                self.std_prim_ref = spr_node.attrib['id']
-
-            pinref_node = pad_node.find(prefix('PinRef'))
-            if pinref_node is not None:
-                self.pin = pinref_node.attrib['pin']
-
     def parse_Package(self):
         pkg_node = self.root.find(prefix(f'Ecad/CadData/Step/Package[@name="{self.name}"]'))
         if pkg_node is None:
@@ -680,19 +847,39 @@ class IPC2581_Package:
         else:
             pad_nodes = land_node.findall(prefix('Pad'))
             for pad_node in pad_nodes:
-                pad = IPC2581_Package.IPC2581_Pad()
+                pad = IPC2581_Pad()
                 pad.load(pad_node)
                 self.land_pads.append(pad)
 
     def _parse_Outline(self, outline_node: ET.Element):
         if outline_node.tag != prefix('Outline'):
             raise ValueError(f'Expected Outline tag, instead got {outline_node.tag}.')
-        self.outline = IPC2581_Contour()
-        self.outline.load(outline_node)
-        ld_node = outline_node.find(prefix('LineDesc'))
-        if ld_node is not None:
-            self.lineEnd = ld_node.attrib['lineEnd']
-            self.lineWidth = read_float(ld_node.attrib,'lineWidth')
+        for shape_node in outline_node:  # usually only one?
+            shape_tag = shape_node.tag
+            if shape_tag == prefix('LineDesc'):
+                self.outline_lineEnd = shape_node.attrib['lineEnd']
+                self.outline_lineWidth = read_float(shape_node.attrib, 'lineWidth')
+                continue
+            elif shape_tag == prefix('Circle'):
+                shape = IPC2581_Circle()
+            elif shape_tag == prefix('RectCenter'):
+                shape = IPC2581_RectCenter()
+            elif shape_tag == prefix('Oval'):
+                shape = IPC2581_Oval()
+            elif shape_tag == prefix('Arc'):
+                shape = IPC2581_Arc()
+            elif shape_tag == prefix('Contour'):
+                shape = IPC2581_Contour()
+            elif shape_tag == prefix('Polygon'):
+                shape = IPC2581_Polygon()
+            elif shape_tag == prefix('Polyline'):
+                shape = IPC2581_Polyline()
+            else:
+                raise ValueError(f"Unknown geometry type with tag {shape_tag}")
+            shape.load(shape_node)
+            self.outline = shape  # NOTE: If more than one, this needs to be a list
+            # Otherwise we're just reassigning
+
 
     def _parse_SilkScreen(self, silkscreen_node: ET.Element):
         if silkscreen_node.tag != prefix('SilkScreen'):
@@ -710,12 +897,32 @@ class IPC2581_Package:
         outline_node = asm_dwg_node.find(prefix('Outline'))
         if outline_node.tag != prefix('Outline'):
             raise ValueError(f'Expected Outline tag, instead got {outline_node.tag}.')
-        self.asm_dwg_outline = IPC2581_Contour()
-        self.asm_dwg_outline.load(outline_node)
-        ld_node = outline_node.find(prefix('LineDesc'))
-        if ld_node is not None:
-            self.asm_dwg_lineEnd = ld_node.attrib['lineEnd']
-            self.asm_dwg_lineWidth = read_float(ld_node.attrib,'lineWidth')
+
+        for shape_node in outline_node:  # usually only one?
+            shape_tag = shape_node.tag
+            if shape_tag == prefix('LineDesc'):
+                self.asm_dwg_lineEnd = shape_node.attrib['lineEnd']
+                self.asm_dwg_lineWidth = read_float(shape_node.attrib, 'lineWidth')
+                continue
+            elif shape_tag == prefix('Circle'):
+                shape = IPC2581_Circle()
+            elif shape_tag == prefix('RectCenter'):
+                shape = IPC2581_RectCenter()
+            elif shape_tag == prefix('Oval'):
+                shape = IPC2581_Oval()
+            elif shape_tag == prefix('Arc'):
+                shape = IPC2581_Arc()
+            elif shape_tag == prefix('Contour'):
+                shape = IPC2581_Contour()
+            elif shape_tag == prefix('Polygon'):
+                shape = IPC2581_Polygon()
+            elif shape_tag == prefix('Polyline'):
+                shape = IPC2581_Polyline()
+            else:
+                raise ValueError(f"Unknown geometry type with tag {shape_tag}")
+            shape.load(shape_node)
+            self.asm_dwg_outline = shape  # NOTE: If more than one, this needs to be a list
+            # Otherwise we're just reassigning
 
         # Next get markings
         marking_nodes = asm_dwg_node.findall(prefix('Marking'))
@@ -756,11 +963,12 @@ class PCBAssembly:
         # Bom
         self.Bom = None
 
+        # Profile and Datum
+        self.Profile = None
+        self.Datum = (0.0, 0.0)
+
         # Layers
         self.Layers = {}
-
-        # Components
-        self.Components = []
 
         # Packages
         self.Packages = {}
@@ -864,6 +1072,39 @@ class PCBAssembly:
         for layer_name in self.layer_refs:
             self.Layers[layer_name] = IPC2581_Layer(self.root,layer_name)
 
+        # Parse Profile
+        prof_node = root.find(prefix('Ecad/CadData/Step/Profile'))
+        if prof_node is not None:
+            for shape_node in prof_node:  # usually only one
+                shape_tag = shape_node.tag
+                if shape_tag == prefix('Circle'):
+                    shape = IPC2581_Circle()
+                elif shape_tag == prefix('RectCenter'):
+                    shape = IPC2581_RectCenter()
+                elif shape_tag == prefix('Oval'):
+                    shape = IPC2581_Oval()
+                elif shape_tag == prefix('Arc'):
+                    shape = IPC2581_Arc()
+                elif shape_tag == prefix('Contour'):
+                    shape = IPC2581_Contour()
+                elif shape_tag == prefix('Polygon'):
+                    shape = IPC2581_Polygon()
+                elif shape_tag == prefix('Polyline'):
+                    shape = IPC2581_Polyline()
+                else:
+                    raise ValueError(f"Unknown geometry type with tag {shape_tag}")
+
+                shape.load(shape_node)
+                self.Profile = shape
+                # NOTE: If more than one shape, this needs to be a list
+                # Otherwise we're just reassigning
+
+        datum_node = root.find(prefix('Ecad/CadData/Step/Datum'))
+        if datum_node is not None:
+            x = read_float(datum_node.attrib,'x')
+            y = read_float(datum_node.attrib,'y')
+            self.Datum = (x,y)
+
         # Load packages
         package_names = []
         package_nodes = root.findall(prefix('Ecad/CadData/Step/Package'))
@@ -927,13 +1168,6 @@ class PCBAssembly:
             es_id = es_node.attrib['id']
             for shape_node in es_node:  # there should only be one
                 shape_tag = shape_node.tag
-                # Geometry types:
-                # - Circle
-                # - RectCenter
-                # - Oval
-                # - Contour.Polygon
-                # - Polyline
-                # - Arc
                 if shape_tag == prefix('Circle'):
                     shape = IPC2581_Circle()
                 elif shape_tag == prefix('RectCenter'):
@@ -944,6 +1178,8 @@ class PCBAssembly:
                     shape = IPC2581_Arc()
                 elif shape_tag == prefix('Contour'):
                     shape = IPC2581_Contour()
+                elif shape_tag == prefix('Polygon'):
+                    shape = IPC2581_Polygon()
                 elif shape_tag == prefix('Polyline'):
                     shape = IPC2581_Polyline()
                 else:
@@ -1004,10 +1240,11 @@ if __name__ == '__main__':
     ===========
     Package is finished
     Basic geometry tags are finished
-    LayerFeature is probably most of the way there, check for Hole?
-    Layer objects need the pads for the components, as well as vias
-    Layer objects need to handle Set tags without net names
-    Datum and Profile have not been implemented
+    LayerFeature is most of the way there
+    Components are done
+    Datum and Profile have been implemented
+    
+    Hole and SlotCavity tags have not been implemented  (part of Set nodes)
     PadStack has not been implemented (I still don't fully understand it)
     Rendering!
     """
